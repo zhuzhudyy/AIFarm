@@ -47,4 +47,26 @@ namespace AIFarmNPC.Presentation
             State = state;
         }
     }
+
+    [Serializable]
+    public struct ResidentDisplayInfo
+    {
+        public string Name;
+        public string Role;
+        public string Provider;
+        public string Model;
+        public string ColorHex;
+        public bool OnlineReady;
+
+        public ResidentDisplayInfo(string name, string role, string provider, string model,
+            string colorHex, bool onlineReady)
+        {
+            Name = name;
+            Role = role;
+            Provider = provider;
+            Model = model;
+            ColorHex = colorHex;
+            OnlineReady = onlineReady;
+        }
+    }
 }

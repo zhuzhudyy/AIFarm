@@ -15,10 +15,14 @@ namespace AIFarmNPC.Presentation
         [SerializeField] private bool standaloneDemo = true;
         private FarmWorldView world;
         private FarmDashboardUI dashboard;
+        private TownResidentsView townResidents;
+        private ResidentRosterUI residentRoster;
         private Coroutine demoRoutine;
 
         public FarmWorldView World { get { return world; } }
         public FarmDashboardUI Dashboard { get { return dashboard; } }
+        public TownResidentsView TownResidents { get { return townResidents; } }
+        public ResidentRosterUI ResidentRoster { get { return residentRoster; } }
         public bool StandaloneDemo
         {
             get { return standaloneDemo; }
@@ -39,6 +43,8 @@ namespace AIFarmNPC.Presentation
             EnsureEventSystem();
             world = gameObject.AddComponent<FarmWorldView>();
             dashboard = gameObject.AddComponent<FarmDashboardUI>();
+            townResidents = gameObject.AddComponent<TownResidentsView>();
+            residentRoster = gameObject.AddComponent<ResidentRosterUI>();
         }
 
         private void Start()

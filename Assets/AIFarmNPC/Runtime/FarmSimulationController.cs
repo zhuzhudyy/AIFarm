@@ -25,9 +25,18 @@ namespace AIFarmNPC.Runtime
 
         private FarmGameApi _gameApi;
         private FarmNpcAgent _agent;
+        private readonly List<TownResidentProfile> _residents = new List<TownResidentProfile>();
+        private readonly List<FarmNpcAgent> _residentAgents = new List<FarmNpcAgent>();
         private FarmPresentationBootstrap _presentation;
         private FarmDashboardUI _dashboard;
         private FarmWorldView _worldView;
+        private TownResidentsView _townResidentsView;
+        private ResidentRosterUI _residentRoster;
+        private ResidentModelGateway _modelGateway;
+        private int _selectedResidentIndex;
+        private int _activeTaskResidentIndex = -1;
+        private int _executingResidentIndex;
+        private bool _modelRequestInFlight;
         private int _preparedWeedStep = -1;
         private string _lastActionMessage = string.Empty;
         private string _lastHarvestedPlot = string.Empty;
@@ -35,6 +44,7 @@ namespace AIFarmNPC.Runtime
 
         public FarmGameApi GameApi => _gameApi;
         public FarmNpcAgent Agent => _agent;
+        public IReadOnlyList<TownResidentProfile> Residents => _residents;
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         private static void EnsureSimulation()
@@ -59,39 +69,105 @@ namespace AIFarmNPC.Runtime
             _presentation.StandaloneDemo = false;
             _dashboard = _presentation.Dashboard;
             _worldView = _presentation.World;
+            _townResidentsView = _presentation.TownResidents;
+            _residentRoster = _presentation.ResidentRoster;
 
             _gameApi = new FarmGameApi();
-            _agent = new FarmNpcAgent(this, this, expressionSink: this);
+            _modelGateway = gameObject.AddComponent<ResidentModelGateway>();
+            _residents.AddRange(TownResidentCatalog.CreateDefaultResidents());
+            for (var i = 0; i < _residents.Count; i++)
+                _residentAgents.Add(new FarmNpcAgent(this, this, mind: new AgentMind(_residents[i].Persona), expressionSink: this));
+            _agent = _residentAgents[0];
+            var displays = BuildResidentDisplays();
+            _townResidentsView.Build(_worldView, displays);
+            _residentRoster.SetResidents(displays, 0);
+            _residentRoster.ResidentSelected += SelectResident;
             _dashboard.CommandSubmitted += SubmitCommand;
             _dashboard.ClearLog();
-            _dashboard.AppendLog("系统：确定性农场 API 已就绪。输入一句话即可安排任务。");
+            _dashboard.AppendLog("系统：4 名 AI 居民已就绪，每人拥有独立模型路由。");
             _dashboard.CommandText = "沫沫，请在地块1种胡萝卜并照顾到收获";
             RefreshPresentation();
-            _worldView.Say("我会先观察，再按计划一步步行动！", "🌱", 5f);
+            _townResidentsView.Say(0, "选择我们中的任何一位来帮忙吧！", "🏡", 5f);
             _nextTickAt = Time.unscaledTime + TickSeconds;
         }
 
         private void OnDestroy()
         {
             if (_dashboard != null) _dashboard.CommandSubmitted -= SubmitCommand;
+            if (_residentRoster != null) _residentRoster.ResidentSelected -= SelectResident;
         }
 
         private void Update()
         {
-            if (_agent == null || Time.unscaledTime < _nextTickAt) return;
+            if (_residentAgents.Count == 0 || Time.unscaledTime < _nextTickAt) return;
             _nextTickAt = Time.unscaledTime + TickSeconds;
+            if (_activeTaskResidentIndex < 0) return;
+            _agent = _residentAgents[_activeTaskResidentIndex];
+            _executingResidentIndex = _activeTaskResidentIndex;
             if (_agent.State != AgentRunState.Running && _agent.State != AgentRunState.Waiting) return;
             PrepareWorldForCurrentStep();
             _agent.Tick();
+            if (_agent.State == AgentRunState.Succeeded || _agent.State == AgentRunState.Failed)
+                _activeTaskResidentIndex = -1;
             RefreshPresentation();
         }
 
         private void SubmitCommand(string command)
         {
+            if (_modelRequestInFlight || _activeTaskResidentIndex >= 0)
+            {
+                _dashboard.AppendLog("系统：当前居民仍在处理任务，请稍候。");
+                return;
+            }
+            var resident = _residents[_selectedResidentIndex];
+            if (!resident.ModelConfig.HasApiKey())
+            {
+                _dashboard.AppendLog("模型路由：未设置 " + resident.ModelConfig.ApiKeyEnvironmentVariable +
+                                     "，" + resident.Persona.Name + " 使用确定性离线规划。");
+                _townResidentsView.Say(_selectedResidentIndex,
+                    resident.Persona.CatchPhrase + "，我用本地计划也能完成！", "🧭", 3.5f);
+                BeginTask(command, _selectedResidentIndex);
+                return;
+            }
+            StartCoroutine(SubmitWithResidentModel(command));
+        }
+
+        private IEnumerator SubmitWithResidentModel(string command)
+        {
+            _modelRequestInFlight = true;
+            _dashboard.SetCommandInteractable(false);
+            var residentIndex = _selectedResidentIndex;
+            var resident = _residents[residentIndex];
+            _dashboard.AppendLog("模型路由：" + resident.Persona.Name + " → " + resident.ModelConfig.DisplayName +
+                                 " / " + resident.ModelConfig.Model);
+
+            ModelGatewayReply reply = null;
+            yield return _modelGateway.Generate(resident, command, value => reply = value);
+            if (reply != null && reply.Success)
+            {
+                _dashboard.AppendLog(resident.Persona.Name + "（" + resident.ModelConfig.DisplayName + "）：" + reply.Text);
+                _townResidentsView.Say(residentIndex, reply.Text, "💬", 4f);
+            }
+            else
+            {
+                _dashboard.AppendLog("模型路由：" + (reply?.Error ?? "在线模型无响应") + " 使用确定性离线规划。 ");
+                _townResidentsView.Say(residentIndex, resident.Persona.CatchPhrase + "，我用本地计划也能完成！", "🧭", 3.5f);
+            }
+
+            _modelRequestInFlight = false;
+            BeginTask(command, residentIndex);
+        }
+
+        private void BeginTask(string command, int residentIndex)
+        {
+            _activeTaskResidentIndex = residentIndex;
+            _executingResidentIndex = residentIndex;
+            _agent = _residentAgents[residentIndex];
             var acceptance = _agent.Submit(command, "plot-1", "carrot");
             if (!acceptance.Accepted)
             {
                 _dashboard.AppendLog("系统：无法接受任务 — " + acceptance.Message);
+                _activeTaskResidentIndex = -1;
                 RefreshPresentation();
                 return;
             }
@@ -101,6 +177,38 @@ namespace AIFarmNPC.Runtime
             _dashboard.AppendLog("计划器：已生成 " + acceptance.Plan.Steps.Count + " 步安全计划（" + acceptance.Plan.Source + "）。");
             _dashboard.SetCommandInteractable(false);
             RefreshPresentation();
+        }
+
+        private void SelectResident(int index)
+        {
+            if (index < 0 || index >= _residents.Count) return;
+            if (_activeTaskResidentIndex >= 0 || _modelRequestInFlight)
+            {
+                _residentRoster.Select(_activeTaskResidentIndex >= 0 ? _activeTaskResidentIndex : _selectedResidentIndex, false);
+                _dashboard.AppendLog("系统：任务期间不能切换居民。");
+                return;
+            }
+            _selectedResidentIndex = index;
+            _agent = _residentAgents[index];
+            _townResidentsView.SelectResident(index);
+            var resident = _residents[index];
+            _dashboard.CommandText = resident.Persona.Name + "，请在地块1种胡萝卜并照顾到收获";
+            _dashboard.AppendLog("已选择 " + resident.Persona.Name + "；模型：" + resident.ModelConfig.DisplayName +
+                                 " / " + resident.ModelConfig.Model + "。 ");
+            _townResidentsView.Say(index, resident.Persona.CatchPhrase + "！", "👋", 3f);
+            RefreshPresentation();
+        }
+
+        public bool AssignResidentModel(string residentId, ResidentModelConfig config)
+        {
+            for (var i = 0; i < _residents.Count; i++)
+            {
+                if (!string.Equals(_residents[i].Id, residentId, StringComparison.OrdinalIgnoreCase)) continue;
+                _residents[i].AssignModel(config);
+                _residentRoster.SetResidents(BuildResidentDisplays(), _selectedResidentIndex);
+                return true;
+            }
+            return false;
         }
 
         private void PrepareWorldForCurrentStep()
@@ -128,7 +236,7 @@ namespace AIFarmNPC.Runtime
                 if (!_gameApi.State.TryGetPlot(plotId, out var waitingPlot) || waitingPlot.IsReady) return;
                 var result = _gameApi.AdvanceTime(60);
                 _lastActionMessage = result.Message;
-                _dashboard.AppendLog("时间：作物生长 60 分钟，沫沫持续观察状态。");
+                _dashboard.AppendLog("时间：作物生长 60 分钟，" + _residents[_executingResidentIndex].Persona.Name + "持续观察状态。");
             }
         }
 
@@ -187,7 +295,7 @@ namespace AIFarmNPC.Runtime
             var actionLabel = ActionLabel(step.Action);
             _dashboard.AppendLog("Game API：" + actionLabel + (result.Success ? "成功 — " : "失败 — ") + result.Message);
             if (_plotIndices.TryGetValue(plotId, out var index))
-                _worldView.MoveNpcToPlot(index, 0.45f, actionLabel);
+                _townResidentsView.MoveResidentToPlot(_executingResidentIndex, index, 0.45f, actionLabel);
 
             if (result.Success || IsAlreadySatisfied(result.Error)) return ActionExecutionResult.Success(result.Message);
             if (result.Error == FarmActionError.CropNotReady || result.Error == FarmActionError.NoWeeds)
@@ -198,7 +306,8 @@ namespace AIFarmNPC.Runtime
         public void Show(AgentExpression expression)
         {
             if (expression == null || _dashboard == null || _worldView == null) return;
-            _worldView.Say(expression.Text, expression.Emoji, 3.4f);
+            var residentIndex = FindResidentByName(expression.Speaker);
+            _townResidentsView.Say(residentIndex, expression.Text, expression.Emoji, 3.4f);
             _dashboard.AppendLog(expression.Speaker + "：" + expression.DisplayText);
             _dashboard.SetNpcStatus(expression.Speaker, MoodLabel(expression.Mood), CurrentActionLabel());
         }
@@ -227,6 +336,12 @@ namespace AIFarmNPC.Runtime
             if (_agent == null || _agent.CurrentPlan == null)
             {
                 _dashboard.SetPlan(null);
+                _dashboard.SetCommandInteractable(!_modelRequestInFlight && _activeTaskResidentIndex < 0);
+                var idleResident = _residents.Count == 0 ? null : _residents[_selectedResidentIndex];
+                if (idleResident != null)
+                    _dashboard.SetNpcStatus(idleResident.Persona.Name,
+                        MoodLabel(_agent?.Mind.Mood ?? AgentMood.Cheerful) + " · " + idleResident.ModelConfig.DisplayName,
+                        "等待安排");
                 return;
             }
 
@@ -242,8 +357,32 @@ namespace AIFarmNPC.Runtime
                 steps.Add(new PlanDisplayStep(ActionLabel(_agent.CurrentPlan.Steps[i].Action), stateForStep));
             }
             _dashboard.SetPlan(steps);
-            _dashboard.SetCommandInteractable(_agent.State != AgentRunState.Running && _agent.State != AgentRunState.Waiting);
-            _dashboard.SetNpcStatus("沫沫", MoodLabel(_agent.Mind.Mood), CurrentActionLabel());
+            var busy = _modelRequestInFlight || _activeTaskResidentIndex >= 0;
+            _dashboard.SetCommandInteractable(!busy);
+            var currentResident = _residents[Mathf.Clamp(_activeTaskResidentIndex >= 0
+                ? _activeTaskResidentIndex : _selectedResidentIndex, 0, _residents.Count - 1)];
+            _dashboard.SetNpcStatus(currentResident.Persona.Name,
+                MoodLabel(_agent.Mind.Mood) + " · " + currentResident.ModelConfig.DisplayName,
+                CurrentActionLabel());
+        }
+
+        private List<ResidentDisplayInfo> BuildResidentDisplays()
+        {
+            var result = new List<ResidentDisplayInfo>(_residents.Count);
+            foreach (var resident in _residents)
+            {
+                result.Add(new ResidentDisplayInfo(resident.Persona.Name, resident.Specialty,
+                    resident.ModelConfig.DisplayName, resident.ModelConfig.Model,
+                    resident.ColorHex, resident.ModelConfig.HasApiKey()));
+            }
+            return result;
+        }
+
+        private int FindResidentByName(string name)
+        {
+            for (var i = 0; i < _residents.Count; i++)
+                if (string.Equals(_residents[i].Persona.Name, name, StringComparison.OrdinalIgnoreCase)) return i;
+            return Mathf.Clamp(_executingResidentIndex, 0, Mathf.Max(0, _residents.Count - 1));
         }
 
         private string CurrentActionLabel()
