@@ -1,0 +1,23 @@
+{
+  "name": "AIFarmNPC.Agent.Tests",
+  "rootNamespace": "AIFarmNPC.Agent.Tests",
+  "references": [
+    "AIFarmNPC.Agent"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": [
+    "UNITY_INCLUDE_TESTS"
+  ],
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

@@ -1,0 +1,14 @@
+{
+  "name": "AIFarmNPC.Core.EditModeTests",
+  "rootNamespace": "AIFarmNPC.Core.Tests",
+  "references": [
+    "AIFarmNPC.Core"
+  ],
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "autoReferenced": false
+}
