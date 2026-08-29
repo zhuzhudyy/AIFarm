@@ -79,7 +79,8 @@ namespace AIFarmNPC.Agent
         {
             Mood = step.Action == FarmActionKind.WaitUntilMature ? AgentMood.Patient : AgentMood.Focused;
             var action = LocalAction(step.Action, language);
-            return Make(language == "en" ? $"Now: {action}." : $"现在去{action}。", Mood == AgentMood.Patient ? "⏳" : "💪");
+            var text = language == "en" ? $"Now: {action}." : PersonaStepLine(action);
+            return Make(text, ActionEmoji(step.Action));
         }
 
         public AgentExpression OnRetry(FarmPlanStep step, string language, string reason)
@@ -96,7 +97,7 @@ namespace AIFarmNPC.Agent
             Mood = AgentMood.Proud;
             var summary = plan.Language == "en" ? "Completed: " + plan.Goal : "完成任务：" + plan.Goal;
             Remember(world, summary, true);
-            return Make(plan.Language == "en" ? "All done—the harvest is ready!" : "全部完成，收成到手啦！", "🎉");
+            return Make(plan.Language == "en" ? "All done—the harvest is ready!" : PersonaCompletionLine(), "🎉");
         }
 
         public AgentExpression OnFailed(FarmTaskPlan plan, WorldObservation world, string reason)
@@ -115,7 +116,46 @@ namespace AIFarmNPC.Agent
                 : "我没听懂。可以让我种田、浇水、施肥、除草或收获。", "🤔");
         }
 
+        public void RememberConversation(WorldObservation world, string otherResident, string line,
+            AgentMood mood = AgentMood.Cheerful)
+        {
+            Mood = mood;
+            var other = string.IsNullOrWhiteSpace(otherResident) ? "其他居民" : otherResident.Trim();
+            var content = string.IsNullOrWhiteSpace(line) ? "聊了聊小镇近况" : line.Trim();
+            Remember(world, "与" + other + "闲聊：" + content, true);
+        }
+
         private AgentExpression Make(string text, string emoji) => new AgentExpression(Persona.Name, text, emoji, Mood);
+
+        private string PersonaStepLine(string action)
+        {
+            if (Persona.Role.Contains("植物")) return "先观察一下，我去" + action + "，顺便看看植株的反应。";
+            if (Persona.Role.Contains("天气")) return "让我算算时辰，现在正适合" + action + "。";
+            if (Persona.Role.Contains("仓库")) return "工具和物资确认好了，我去" + action + "。";
+            return "我来统筹，下一步去" + action + "，交给我吧！";
+        }
+
+        private string PersonaCompletionLine()
+        {
+            if (Persona.Role.Contains("植物")) return "植株状态很漂亮，这轮照料顺利完成啦！";
+            if (Persona.Role.Contains("天气")) return "时辰刚刚好，这一轮农活完整收尾啦！";
+            if (Persona.Role.Contains("仓库")) return "收成已经清点入包，数量核对完成！";
+            return "全部完成，田地和收成都安排妥当啦！";
+        }
+
+        private static string ActionEmoji(FarmActionKind action)
+        {
+            switch (action)
+            {
+                case FarmActionKind.Sow: return "🌱";
+                case FarmActionKind.Water: return "💧";
+                case FarmActionKind.Fertilize: return "✨";
+                case FarmActionKind.Weed: return "🧤";
+                case FarmActionKind.WaitUntilMature: return "⏳";
+                case FarmActionKind.Harvest: return "🧺";
+                default: return "💪";
+            }
+        }
 
         private void Remember(WorldObservation world, string summary, bool positive)
         {

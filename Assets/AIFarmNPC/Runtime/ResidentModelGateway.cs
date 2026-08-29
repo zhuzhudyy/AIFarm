@@ -31,6 +31,40 @@ namespace AIFarmNPC.Runtime
     {
         public IEnumerator Generate(TownResidentProfile resident, string userCommand, Action<ModelGatewayReply> completed)
         {
+            var prompt = resident == null
+                ? string.Empty
+                : "你是" + resident.Persona.Name + "，身份是" + resident.Persona.Role +
+                  "，专长是" + resident.Specialty + "。玩家说：\"" + (userCommand ?? string.Empty) +
+                  "\"。请用符合人设的一句简短中文回应，并说明你会先观察再通过游戏动作接口执行；不要声称已经修改世界状态。";
+            yield return GeneratePrompt(resident, prompt, completed);
+        }
+
+        public IEnumerator GenerateSocialLine(TownResidentProfile speaker, TownResidentProfile listener,
+            ResidentSocialCue cue, string previousLine, Action<ModelGatewayReply> completed)
+        {
+            if (speaker == null || listener == null)
+            {
+                completed?.Invoke(new ModelGatewayReply(false, "", "闲聊居民配置为空。", false));
+                yield break;
+            }
+
+            cue = cue ?? ResidentSocialCueFactory.Create(speaker, null);
+            var replyInstruction = string.IsNullOrWhiteSpace(previousLine)
+                ? "请主动开启一个轻松、有观察价值的话题。"
+                : listener.Persona.Name + "刚才对你说：\"" + previousLine + "\"。请自然接话，不要重复对方原句。";
+            var prompt = "你是小镇居民" + speaker.Persona.Name + "，身份是" + speaker.Persona.Role +
+                         "，专长是" + speaker.Specialty + "，口头禅是\"" + speaker.Persona.CatchPhrase + "\"。" +
+                         "你正在和" + listener.Persona.Name + "（" + listener.Persona.Role + "，专长" +
+                         listener.Specialty + "）在农场空闲交谈。你刚观察到【" + cue.ObservationLabel + "】：" +
+                         cue.StateSummary + "。你的表达角度：" + cue.PersonaAngle + "。" +
+                         replyInstruction +
+                         "只输出一句自然中文台词，控制在12到45个汉字；要符合人设，可体现关心、发现或小建议；" +
+                         "不要输出姓名、引号、表情符号、舞台说明，不要接受玩家任务，也不要声称已经改变游戏世界。";
+            yield return GeneratePrompt(speaker, prompt, completed);
+        }
+
+        private IEnumerator GeneratePrompt(TownResidentProfile resident, string prompt, Action<ModelGatewayReply> completed)
+        {
             if (resident == null)
             {
                 completed?.Invoke(new ModelGatewayReply(false, "", "居民配置为空。", false));
@@ -44,7 +78,7 @@ namespace AIFarmNPC.Runtime
                 yield break;
             }
 
-            var key = Environment.GetEnvironmentVariable(config.ApiKeyEnvironmentVariable);
+            var key = config.ResolveApiKey();
             if (string.IsNullOrWhiteSpace(key))
             {
                 completed?.Invoke(new ModelGatewayReply(false, "",
@@ -57,7 +91,7 @@ namespace AIFarmNPC.Runtime
             try
             {
                 url = ResolveUrl(config);
-                body = BuildBody(resident, userCommand);
+                body = BuildBody(resident, prompt);
             }
             catch (Exception exception)
             {
@@ -105,12 +139,9 @@ namespace AIFarmNPC.Runtime
                 : config.Endpoint;
         }
 
-        private static string BuildBody(TownResidentProfile resident, string command)
+        private static string BuildBody(TownResidentProfile resident, string prompt)
         {
             var config = resident.ModelConfig;
-            var prompt = "你是" + resident.Persona.Name + "，身份是" + resident.Persona.Role +
-                         "，专长是" + resident.Specialty + "。玩家说：\"" + (command ?? string.Empty) +
-                         "\"。请用符合人设的一句简短中文回应，并说明你会先观察再通过游戏动作接口执行；不要声称已经修改世界状态。";
 
             switch (config.Provider)
             {

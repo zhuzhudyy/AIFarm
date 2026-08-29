@@ -17,12 +17,14 @@ namespace AIFarmNPC.Presentation
         private FarmDashboardUI dashboard;
         private TownResidentsView townResidents;
         private ResidentRosterUI residentRoster;
+        private ResidentApiConfigUI apiConfig;
         private Coroutine demoRoutine;
 
         public FarmWorldView World { get { return world; } }
         public FarmDashboardUI Dashboard { get { return dashboard; } }
         public TownResidentsView TownResidents { get { return townResidents; } }
         public ResidentRosterUI ResidentRoster { get { return residentRoster; } }
+        public ResidentApiConfigUI ApiConfig { get { return apiConfig; } }
         public bool StandaloneDemo
         {
             get { return standaloneDemo; }
@@ -45,6 +47,7 @@ namespace AIFarmNPC.Presentation
             dashboard = gameObject.AddComponent<FarmDashboardUI>();
             townResidents = gameObject.AddComponent<TownResidentsView>();
             residentRoster = gameObject.AddComponent<ResidentRosterUI>();
+            apiConfig = gameObject.AddComponent<ResidentApiConfigUI>();
         }
 
         private void Start()

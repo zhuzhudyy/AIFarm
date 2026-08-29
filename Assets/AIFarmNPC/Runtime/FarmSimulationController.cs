@@ -17,6 +17,8 @@ namespace AIFarmNPC.Runtime
         IWorldObservationPort, IFarmActionPort, IAgentExpressionSink
     {
         private const float TickSeconds = 0.65f;
+        private const float SocialConversationMinDelay = 35f;
+        private const float SocialConversationMaxDelay = 60f;
 
         private readonly Dictionary<string, int> _plotIndices = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {
@@ -32,15 +34,20 @@ namespace AIFarmNPC.Runtime
         private FarmWorldView _worldView;
         private TownResidentsView _townResidentsView;
         private ResidentRosterUI _residentRoster;
+        private ResidentApiConfigUI _apiConfig;
         private ResidentModelGateway _modelGateway;
         private int _selectedResidentIndex;
         private int _activeTaskResidentIndex = -1;
         private int _executingResidentIndex;
         private bool _modelRequestInFlight;
+        private bool _socialConversationInFlight;
+        private Coroutine _socialConversationRoutine;
+        private int _lastSocialSpeakerIndex = -1;
         private int _preparedWeedStep = -1;
         private string _lastActionMessage = string.Empty;
         private string _lastHarvestedPlot = string.Empty;
         private float _nextTickAt;
+        private float _nextSocialConversationAt;
 
         public FarmGameApi GameApi => _gameApi;
         public FarmNpcAgent Agent => _agent;
@@ -71,6 +78,7 @@ namespace AIFarmNPC.Runtime
             _worldView = _presentation.World;
             _townResidentsView = _presentation.TownResidents;
             _residentRoster = _presentation.ResidentRoster;
+            _apiConfig = _presentation.ApiConfig;
 
             _gameApi = new FarmGameApi();
             _modelGateway = gameObject.AddComponent<ResidentModelGateway>();
@@ -82,6 +90,10 @@ namespace AIFarmNPC.Runtime
             _townResidentsView.Build(_worldView, displays);
             _residentRoster.SetResidents(displays, 0);
             _residentRoster.ResidentSelected += SelectResident;
+            _apiConfig.SetResidents(displays, 0);
+            SyncApiConfigUI();
+            _apiConfig.ApplyResidentRequested += ApplyResidentApiConfiguration;
+            _apiConfig.ApplyAllRequested += ApplyAllApiConfiguration;
             _dashboard.CommandSubmitted += SubmitCommand;
             _dashboard.ClearLog();
             _dashboard.AppendLog("系统：4 名 AI 居民已就绪，每人拥有独立模型路由。");
@@ -89,16 +101,24 @@ namespace AIFarmNPC.Runtime
             RefreshPresentation();
             _townResidentsView.Say(0, "选择我们中的任何一位来帮忙吧！", "🏡", 5f);
             _nextTickAt = Time.unscaledTime + TickSeconds;
+            ScheduleNextSocialConversation(12f, 20f);
         }
 
         private void OnDestroy()
         {
+            CancelSocialConversation(false);
             if (_dashboard != null) _dashboard.CommandSubmitted -= SubmitCommand;
             if (_residentRoster != null) _residentRoster.ResidentSelected -= SelectResident;
+            if (_apiConfig != null)
+            {
+                _apiConfig.ApplyResidentRequested -= ApplyResidentApiConfiguration;
+                _apiConfig.ApplyAllRequested -= ApplyAllApiConfiguration;
+            }
         }
 
         private void Update()
         {
+            TryStartSocialConversation();
             if (_residentAgents.Count == 0 || Time.unscaledTime < _nextTickAt) return;
             _nextTickAt = Time.unscaledTime + TickSeconds;
             if (_activeTaskResidentIndex < 0) return;
@@ -108,12 +128,16 @@ namespace AIFarmNPC.Runtime
             PrepareWorldForCurrentStep();
             _agent.Tick();
             if (_agent.State == AgentRunState.Succeeded || _agent.State == AgentRunState.Failed)
+            {
                 _activeTaskResidentIndex = -1;
+                ScheduleNextSocialConversation();
+            }
             RefreshPresentation();
         }
 
         private void SubmitCommand(string command)
         {
+            if (_socialConversationInFlight) CancelSocialConversation(true);
             if (_modelRequestInFlight || _activeTaskResidentIndex >= 0)
             {
                 _dashboard.AppendLog("系统：当前居民仍在处理任务，请稍候。");
@@ -122,8 +146,10 @@ namespace AIFarmNPC.Runtime
             var resident = _residents[_selectedResidentIndex];
             if (!resident.ModelConfig.HasApiKey())
             {
-                _dashboard.AppendLog("模型路由：未设置 " + resident.ModelConfig.ApiKeyEnvironmentVariable +
-                                     "，" + resident.Persona.Name + " 使用确定性离线规划。");
+                var keySource = string.IsNullOrWhiteSpace(resident.ModelConfig.ApiKeyEnvironmentVariable)
+                    ? "当前居民尚未配置 API Key"
+                    : "未设置 " + resident.ModelConfig.ApiKeyEnvironmentVariable;
+                _dashboard.AppendLog("模型路由：" + keySource + "，" + resident.Persona.Name + " 使用确定性离线规划。");
                 _townResidentsView.Say(_selectedResidentIndex,
                     resident.Persona.CatchPhrase + "，我用本地计划也能完成！", "🧭", 3.5f);
                 BeginTask(command, _selectedResidentIndex);
@@ -191,6 +217,8 @@ namespace AIFarmNPC.Runtime
             _selectedResidentIndex = index;
             _agent = _residentAgents[index];
             _townResidentsView.SelectResident(index);
+            _apiConfig.SetResidents(BuildResidentDisplays(), index);
+            SyncApiConfigUI();
             var resident = _residents[index];
             _dashboard.CommandText = resident.Persona.Name + "，请在地块1种胡萝卜并照顾到收获";
             _dashboard.AppendLog("已选择 " + resident.Persona.Name + "；模型：" + resident.ModelConfig.DisplayName +
@@ -205,10 +233,186 @@ namespace AIFarmNPC.Runtime
             {
                 if (!string.Equals(_residents[i].Id, residentId, StringComparison.OrdinalIgnoreCase)) continue;
                 _residents[i].AssignModel(config);
-                _residentRoster.SetResidents(BuildResidentDisplays(), _selectedResidentIndex);
+                RefreshResidentConfigurationViews();
                 return true;
             }
             return false;
+        }
+
+        private void ApplyResidentApiConfiguration(int index, string endpoint, string model, string apiKey)
+        {
+            if (index < 0 || index >= _residents.Count) return;
+            try
+            {
+                CancelSocialConversation(false);
+                if (string.IsNullOrWhiteSpace(apiKey)) apiKey = _residents[index].ModelConfig.ResolveApiKey();
+                var config = ResidentModelConfig.OpenAICompatible(endpoint, model, apiKey);
+                _residents[index].AssignModel(config);
+                RefreshResidentConfigurationViews();
+                _apiConfig.ShowResult("已保存到 " + _residents[index].Persona.Name + "。Key 仅驻留内存。", true);
+                _dashboard.AppendLog("API 配置：已更新 " + _residents[index].Persona.Name + " 的 OpenAI-compatible 路由。");
+                ScheduleNextSocialConversation(10f, 16f);
+            }
+            catch (Exception exception)
+            {
+                _apiConfig.ShowResult("配置失败：" + exception.Message, false);
+            }
+        }
+
+        private void ApplyAllApiConfiguration(string endpoint, string model, string apiKey)
+        {
+            try
+            {
+                CancelSocialConversation(false);
+                if (string.IsNullOrWhiteSpace(apiKey)) throw new ArgumentException("一键配置必须输入 API Key。");
+                for (var i = 0; i < _residents.Count; i++)
+                    _residents[i].AssignModel(ResidentModelConfig.OpenAICompatible(endpoint, model, apiKey));
+                RefreshResidentConfigurationViews();
+                _apiConfig.ShowResult("已将同一 OpenAI-compatible 配置应用到全部 " + _residents.Count + " 名居民。", true);
+                _dashboard.AppendLog("API 配置：全部居民已切换到同一 URL / 模型。 ");
+                ScheduleNextSocialConversation(10f, 16f);
+            }
+            catch (Exception exception)
+            {
+                _apiConfig.ShowResult("配置失败：" + exception.Message, false);
+            }
+        }
+
+        private void RefreshResidentConfigurationViews()
+        {
+            var displays = BuildResidentDisplays();
+            _residentRoster.SetResidents(displays, _selectedResidentIndex);
+            _apiConfig.SetResidents(displays, _selectedResidentIndex);
+            SyncApiConfigUI();
+        }
+
+        private void SyncApiConfigUI()
+        {
+            for (var i = 0; i < _residents.Count; i++)
+            {
+                var config = _residents[i].ModelConfig;
+                _apiConfig.SetResidentConfiguration(i, config.Endpoint, config.Model, config.HasApiKey());
+            }
+        }
+
+        private void TryStartSocialConversation()
+        {
+            if (_socialConversationInFlight || _modelRequestInFlight || _activeTaskResidentIndex >= 0 ||
+                _modelGateway == null || Time.unscaledTime < _nextSocialConversationAt) return;
+
+            var configured = new List<int>();
+            for (var i = 0; i < _residents.Count; i++)
+                if (_residents[i].ModelConfig.HasApiKey()) configured.Add(i);
+
+            if (configured.Count < 2)
+            {
+                ScheduleNextSocialConversation();
+                return;
+            }
+
+            var speakerPosition = UnityEngine.Random.Range(0, configured.Count);
+            if (configured.Count > 2 && configured[speakerPosition] == _lastSocialSpeakerIndex)
+                speakerPosition = (speakerPosition + 1) % configured.Count;
+            var listenerPosition = UnityEngine.Random.Range(0, configured.Count - 1);
+            if (listenerPosition >= speakerPosition) listenerPosition++;
+
+            var speakerIndex = configured[speakerPosition];
+            var listenerIndex = configured[listenerPosition];
+            _lastSocialSpeakerIndex = speakerIndex;
+            _socialConversationRoutine = StartCoroutine(RunSocialConversation(speakerIndex, listenerIndex));
+        }
+
+        private IEnumerator RunSocialConversation(int speakerIndex, int listenerIndex)
+        {
+            _socialConversationInFlight = true;
+            var speaker = _residents[speakerIndex];
+            var listener = _residents[listenerIndex];
+            var observation = Observe();
+            var speakerCue = ResidentSocialCueFactory.Create(speaker, observation);
+            var listenerCue = ResidentSocialCueFactory.Create(listener, observation);
+            ModelGatewayReply opening = null;
+            yield return _modelGateway.GenerateSocialLine(speaker, listener, speakerCue, string.Empty,
+                value => opening = value);
+
+            if (opening == null || !opening.Success || _activeTaskResidentIndex >= 0 || _modelRequestInFlight)
+            {
+                if (opening != null && !opening.Success)
+                    _dashboard.AppendLog("居民闲聊：" + speaker.Persona.Name + " 暂时没有接上话（" + opening.Error + "）");
+                FinishSocialConversation(opening == null || !opening.Success);
+                yield break;
+            }
+
+            var openingLine = NormalizeSocialLine(opening.Text, speaker.Persona.Name);
+            ShowSocialLine(speakerIndex, listenerIndex, openingLine, speakerCue);
+            yield return new WaitForSecondsRealtime(1.6f);
+            if (_activeTaskResidentIndex >= 0 || _modelRequestInFlight)
+            {
+                FinishSocialConversation(false);
+                yield break;
+            }
+
+            ModelGatewayReply response = null;
+            yield return _modelGateway.GenerateSocialLine(listener, speaker, listenerCue, openingLine,
+                value => response = value);
+            if (response != null && response.Success && _activeTaskResidentIndex < 0 && !_modelRequestInFlight)
+            {
+                ShowSocialLine(listenerIndex, speakerIndex,
+                    NormalizeSocialLine(response.Text, listener.Persona.Name), listenerCue);
+            }
+            else if (response != null && !response.Success)
+            {
+                _dashboard.AppendLog("居民闲聊：" + listener.Persona.Name + " 的回应暂时失败（" + response.Error + "）");
+            }
+
+            FinishSocialConversation(response == null || !response.Success);
+        }
+
+        private void ShowSocialLine(int speakerIndex, int listenerIndex, string line, ResidentSocialCue cue)
+        {
+            var speaker = _residents[speakerIndex];
+            var listener = _residents[listenerIndex];
+            _townResidentsView.Say(speakerIndex, line, cue.Emoji, 5.5f);
+            _dashboard.AppendLog("[居民观察·" + cue.ObservationLabel + "] " + cue.Emoji + " " +
+                                 speaker.Persona.Name + " → " + listener.Persona.Name + "：" + line);
+            _dashboard.SetNpcStatus(speaker.Persona.Name,
+                MoodLabel(cue.Mood) + " · " + speaker.Specialty,
+                "正和" + listener.Persona.Name + "交流 · " + cue.ObservationLabel);
+            var observation = Observe();
+            _residentAgents[speakerIndex].Mind.RememberConversation(observation, listener.Persona.Name, line, cue.Mood);
+            _residentAgents[listenerIndex].Mind.RememberConversation(observation, speaker.Persona.Name,
+                speaker.Persona.Name + "说：" + line, cue.Mood);
+        }
+
+        private static string NormalizeSocialLine(string line, string speakerName)
+        {
+            var result = (line ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();
+            result = result.Trim('"', '\'', '“', '”', '「', '」');
+            var namedPrefix = (speakerName ?? string.Empty) + "：";
+            if (namedPrefix.Length > 1 && result.StartsWith(namedPrefix, StringComparison.Ordinal))
+                result = result.Substring(namedPrefix.Length).Trim();
+            return result.Length <= 72 ? result : result.Substring(0, 72) + "…";
+        }
+
+        private void FinishSocialConversation(bool requestFailed)
+        {
+            _socialConversationInFlight = false;
+            _socialConversationRoutine = null;
+            if (requestFailed) ScheduleNextSocialConversation(75f, 120f);
+            else ScheduleNextSocialConversation();
+        }
+
+        private void CancelSocialConversation(bool reschedule)
+        {
+            if (_socialConversationRoutine != null) StopCoroutine(_socialConversationRoutine);
+            _socialConversationRoutine = null;
+            _socialConversationInFlight = false;
+            if (reschedule) ScheduleNextSocialConversation();
+        }
+
+        private void ScheduleNextSocialConversation(float minDelay = SocialConversationMinDelay,
+            float maxDelay = SocialConversationMaxDelay)
+        {
+            _nextSocialConversationAt = Time.unscaledTime + UnityEngine.Random.Range(minDelay, maxDelay);
         }
 
         private void PrepareWorldForCurrentStep()

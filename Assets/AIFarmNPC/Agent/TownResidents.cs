@@ -15,14 +15,17 @@ namespace AIFarmNPC.Agent
     /// <summary>Per-resident model routing. Secrets are referenced by environment variable name only.</summary>
     public sealed class ResidentModelConfig
     {
+        private readonly string _runtimeApiKey;
+
         public ResidentModelConfig(ModelProviderKind provider, string model, string endpoint,
-            string apiKeyEnvironmentVariable, bool onlineEnabled = true)
+            string apiKeyEnvironmentVariable, bool onlineEnabled = true, string runtimeApiKey = "")
         {
             Provider = provider;
             Model = model ?? string.Empty;
             Endpoint = endpoint ?? string.Empty;
             ApiKeyEnvironmentVariable = apiKeyEnvironmentVariable ?? string.Empty;
             OnlineEnabled = onlineEnabled && provider != ModelProviderKind.OfflineRules;
+            _runtimeApiKey = runtimeApiKey ?? string.Empty;
         }
 
         public ModelProviderKind Provider { get; }
@@ -30,14 +33,35 @@ namespace AIFarmNPC.Agent
         public string Endpoint { get; }
         public string ApiKeyEnvironmentVariable { get; }
         public bool OnlineEnabled { get; }
+        public bool UsesRuntimeApiKey => !string.IsNullOrWhiteSpace(_runtimeApiKey);
         public string DisplayName => Provider == ModelProviderKind.OpenAICompatible
             ? "OpenAI Compatible"
             : Provider.ToString();
 
         public bool HasApiKey()
         {
-            return OnlineEnabled && !string.IsNullOrWhiteSpace(ApiKeyEnvironmentVariable) &&
-                   !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(ApiKeyEnvironmentVariable));
+            return OnlineEnabled && !string.IsNullOrWhiteSpace(ResolveApiKey());
+        }
+
+        public string ResolveApiKey()
+        {
+            if (!OnlineEnabled) return string.Empty;
+            if (!string.IsNullOrWhiteSpace(_runtimeApiKey)) return _runtimeApiKey;
+            return string.IsNullOrWhiteSpace(ApiKeyEnvironmentVariable)
+                ? string.Empty
+                : Environment.GetEnvironmentVariable(ApiKeyEnvironmentVariable) ?? string.Empty;
+        }
+
+        public static ResidentModelConfig OpenAICompatible(string endpoint, string model, string apiKey)
+        {
+            if (string.IsNullOrWhiteSpace(endpoint)) throw new ArgumentException("API URL is required.", nameof(endpoint));
+            if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) ||
+                (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp))
+                throw new ArgumentException("API URL must be an absolute HTTP(S) URL.", nameof(endpoint));
+            if (string.IsNullOrWhiteSpace(model)) throw new ArgumentException("Model is required.", nameof(model));
+            if (string.IsNullOrWhiteSpace(apiKey)) throw new ArgumentException("API key is required.", nameof(apiKey));
+            return new ResidentModelConfig(ModelProviderKind.OpenAICompatible, model.Trim(), endpoint.Trim(),
+                string.Empty, true, apiKey.Trim());
         }
     }
 
@@ -63,6 +87,144 @@ namespace AIFarmNPC.Agent
         public void AssignModel(ResidentModelConfig config)
         {
             ModelConfig = config ?? throw new ArgumentNullException(nameof(config));
+        }
+    }
+
+    public sealed class ResidentSocialCue
+    {
+        public ResidentSocialCue(string observationLabel, string stateSummary, string personaAngle,
+            AgentMood mood, string emoji)
+        {
+            ObservationLabel = observationLabel ?? "日常见闻";
+            StateSummary = stateSummary ?? string.Empty;
+            PersonaAngle = personaAngle ?? string.Empty;
+            Mood = mood;
+            Emoji = emoji ?? "💬";
+        }
+
+        public string ObservationLabel { get; }
+        public string StateSummary { get; }
+        public string PersonaAngle { get; }
+        public AgentMood Mood { get; }
+        public string Emoji { get; }
+    }
+
+    /// <summary>Turns authoritative observations into a persona-specific social reaction.</summary>
+    public static class ResidentSocialCueFactory
+    {
+        public static ResidentSocialCue Create(TownResidentProfile resident, WorldObservation world)
+        {
+            if (resident == null) throw new ArgumentNullException(nameof(resident));
+            world = world ?? new WorldObservation(1, 8f, 100, null, null);
+
+            var planted = 0;
+            var mature = 0;
+            var weedy = 0;
+            var dry = 0;
+            var unfertilized = 0;
+            foreach (var plot in world.Plots)
+            {
+                if (plot.IsEmpty) continue;
+                planted++;
+                if (plot.IsMature) mature++;
+                if (plot.HasWeeds) weedy++;
+                if (!plot.IsWatered) dry++;
+                if (!plot.IsFertilized) unfertilized++;
+            }
+
+            string label;
+            string summary;
+            AgentMood mood;
+            if (weedy > 0)
+            {
+                label = "杂草警报";
+                summary = weedy + "块地出现杂草，可能争抢作物养分";
+                mood = AgentMood.Worried;
+            }
+            else if (mature > 0)
+            {
+                label = "成熟提醒";
+                summary = mature + "块作物已经成熟，可以安排收获";
+                mood = AgentMood.Proud;
+            }
+            else if (dry > 0)
+            {
+                label = "缺水关注";
+                summary = dry + "块已种植土地尚未浇水";
+                mood = AgentMood.Worried;
+            }
+            else if (unfertilized > 0)
+            {
+                label = "营养检查";
+                summary = unfertilized + "块作物尚未施肥，背包有" + world.CountItem("fertilizer") + "份肥料";
+                mood = AgentMood.Focused;
+            }
+            else if (world.CountItem("fertilizer") <= 1 ||
+                     world.CountItem("carrotseed") + world.CountItem("turnipseed") <= 2)
+            {
+                label = "库存提醒";
+                summary = "肥料或种子库存接近下限，需要为下一轮种植做准备";
+                mood = AgentMood.Worried;
+            }
+            else if (planted > 0)
+            {
+                label = "生长观察";
+                summary = planted + "块作物正在生长，当前没有紧急异常";
+                mood = AgentMood.Patient;
+            }
+            else if (world.Hour >= 18f)
+            {
+                label = "傍晚闲话";
+                summary = "现在接近一天收尾，农田暂时空闲";
+                mood = AgentMood.Cheerful;
+            }
+            else
+            {
+                label = "日常见闻";
+                summary = "农田目前空闲，适合交流今天的安排";
+                mood = AgentMood.Cheerful;
+            }
+
+            summary = "第" + world.Day + "天约" + ((int)world.Hour).ToString("00") + "时；" + summary;
+            return new ResidentSocialCue(label, summary, PersonaAngle(resident), mood,
+                EmojiFor(resident.Id, mood));
+        }
+
+        private static string PersonaAngle(TownResidentProfile resident)
+        {
+            switch (resident.Id.ToLowerInvariant())
+            {
+                case "momo": return "从统筹农活和照顾伙伴的角度说，语气热情、主动";
+                case "lumi": return "从植物症状、长势和养分的角度说，语气细致、求证";
+                case "gugu": return "从时辰、光照和天气节奏的角度说，语气爱记录、会推算";
+                case "tata": return "从库存、收获和物资准备的角度说，语气可靠、务实";
+                default: return "从自己的身份与专长出发，表达对小镇近况的真实看法";
+            }
+        }
+
+        private static string EmojiFor(string residentId, AgentMood mood)
+        {
+            var id = (residentId ?? string.Empty).ToLowerInvariant();
+            if (mood == AgentMood.Worried)
+            {
+                if (id == "lumi") return "🧐🌿";
+                if (id == "gugu") return "🌦️⚠️";
+                if (id == "tata") return "📦⚠️";
+                return "😟🧤";
+            }
+            if (mood == AgentMood.Proud)
+            {
+                if (id == "lumi") return "🔬🌼";
+                if (id == "gugu") return "☀️⏰";
+                if (id == "tata") return "🥕📦";
+                return "🤩🌾";
+            }
+            if (mood == AgentMood.Patient) return id == "gugu" ? "⏳🌤️" : "🌱👀";
+            if (mood == AgentMood.Focused) return id == "lumi" ? "🔎🌿" : "📝✨";
+            if (id == "lumi") return "🌿🙂";
+            if (id == "gugu") return "🌤️📒";
+            if (id == "tata") return "📦😊";
+            return "🌱😄";
         }
     }
 
