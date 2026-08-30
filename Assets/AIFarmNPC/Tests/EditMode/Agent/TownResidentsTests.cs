@@ -73,5 +73,20 @@ namespace AIFarmNPC.Agent.Tests
             Assert.That(cue.StateSummary, Does.Contain("第3天"));
             Assert.That(cue.Emoji, Does.Contain("🌾"));
         }
+
+        [Test]
+        public void LocalReply_UsesListenerPersonaAndAcknowledgesOnlineSpeaker()
+        {
+            var resident = TownResidentCatalog.CreateDefaultResidents()[1];
+            var cue = ResidentSocialCueFactory.Create(resident,
+                new WorldObservation(1, 9f, 100, null,
+                    new[] { new PlotObservation("plot-1", "carrot", false, false, false, 0.1f) }));
+
+            var line = ResidentSocialCueFactory.CreateLocalReply(resident, cue, "塔塔", "这块地有点干。 ");
+
+            Assert.That(line, Does.StartWith("塔塔说得有道理"));
+            Assert.That(line, Does.Contain("叶片和土壤"));
+            Assert.That(line, Does.Contain(cue.ObservationLabel));
+        }
     }
 }

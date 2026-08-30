@@ -103,7 +103,7 @@ namespace AIFarmNPC.Presentation
             Label(panel, "OpenAI-compatible URL", 16, new Vector2(24f, -158f), new Vector2(-24f, -126f));
             urlInput = CreateInput(panel, "URL", "https://.../v1/chat/completions", new Vector2(24f, -214f), new Vector2(-24f, -164f), false);
             Label(panel, "模型名", 16, new Vector2(24f, -252f), new Vector2(-24f, -220f));
-            modelInput = CreateInput(panel, "Model", "例如 gpt-4o-mini / deepseek-chat", new Vector2(24f, -308f), new Vector2(-24f, -258f), false);
+            modelInput = CreateInput(panel, "Model", "例如 gpt-4o-mini / deepseek-v4-flash", new Vector2(24f, -308f), new Vector2(-24f, -258f), false);
             Label(panel, "API Key（不会回显或持久化）", 16, new Vector2(24f, -346f), new Vector2(-24f, -314f));
             keyInput = CreateInput(panel, "API Key", "sk-...", new Vector2(24f, -402f), new Vector2(-24f, -352f), true);
 

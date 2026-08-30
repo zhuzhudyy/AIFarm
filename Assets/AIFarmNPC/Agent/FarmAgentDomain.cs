@@ -62,13 +62,15 @@ namespace AIFarmNPC.Agent
 
     public sealed class ParsedFarmCommand
     {
-        public ParsedFarmCommand(FarmIntent intent, string cropId, string plotId, string originalText, string language)
+        public ParsedFarmCommand(FarmIntent intent, string cropId, string plotId, string originalText, string language,
+            bool hasExplicitPlot = true)
         {
             Intent = intent;
             CropId = string.IsNullOrWhiteSpace(cropId) ? "wheat" : cropId.Trim().ToLowerInvariant();
             PlotId = string.IsNullOrWhiteSpace(plotId) ? "plot-1" : plotId.Trim();
             OriginalText = originalText ?? string.Empty;
             Language = language == "en" ? "en" : "zh";
+            HasExplicitPlot = hasExplicitPlot;
         }
 
         public FarmIntent Intent { get; }
@@ -76,6 +78,7 @@ namespace AIFarmNPC.Agent
         public string PlotId { get; }
         public string OriginalText { get; }
         public string Language { get; }
+        public bool HasExplicitPlot { get; }
         public bool IsValid => Intent != FarmIntent.Unknown;
     }
 

@@ -190,6 +190,29 @@ namespace AIFarmNPC.Agent
                 EmojiFor(resident.Id, mood));
         }
 
+        public static string CreateLocalReply(TownResidentProfile resident, ResidentSocialCue cue,
+            string otherName, string previousLine)
+        {
+            if (resident == null) throw new ArgumentNullException(nameof(resident));
+            cue = cue ?? Create(resident, null);
+            var name = string.IsNullOrWhiteSpace(otherName) ? "你" : otherName;
+            var acknowledges = string.IsNullOrWhiteSpace(previousLine) ? "" : name + "说得有道理，";
+
+            switch ((resident.Id ?? string.Empty).ToLowerInvariant())
+            {
+                case "momo":
+                    return acknowledges + "我会把“" + cue.ObservationLabel + "”记进今天的农活安排。";
+                case "lumi":
+                    return acknowledges + "我想再看看叶片和土壤，确认“" + cue.ObservationLabel + "”的变化。";
+                case "gugu":
+                    return acknowledges + "我把时辰记下来，过一会儿再对照“" + cue.ObservationLabel + "”。";
+                case "tata":
+                    return acknowledges + "我会顺手核对库存，为“" + cue.ObservationLabel + "”提前备好物资。";
+                default:
+                    return acknowledges + "这条“" + cue.ObservationLabel + "”值得我们继续留意。";
+            }
+        }
+
         private static string PersonaAngle(TownResidentProfile resident)
         {
             switch (resident.Id.ToLowerInvariant())
@@ -248,7 +271,7 @@ namespace AIFarmNPC.Agent
                         "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent", "GEMINI_API_KEY")),
                 new TownResidentProfile("tata", new AgentPersona("塔塔", "可靠的仓库管理员", "库存我最清楚"),
                     "背包与收获", "#62C6A7",
-                    new ResidentModelConfig(ModelProviderKind.OpenAICompatible, "deepseek-chat",
+                    new ResidentModelConfig(ModelProviderKind.OpenAICompatible, "deepseek-v4-flash",
                         "https://api.deepseek.com/chat/completions", "DEEPSEEK_API_KEY"))
             };
         }

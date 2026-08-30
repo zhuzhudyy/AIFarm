@@ -12,6 +12,7 @@ namespace AIFarmNPC.Agent.Tests
             Assert.That(command.Intent, Is.EqualTo(FarmIntent.FullCycle));
             Assert.That(command.CropId, Is.EqualTo("wheat"));
             Assert.That(command.PlotId, Is.EqualTo("A"));
+            Assert.That(command.HasExplicitPlot, Is.True);
             Assert.That(command.Language, Is.EqualTo("zh"));
         }
 
@@ -40,6 +41,15 @@ namespace AIFarmNPC.Agent.Tests
         public void Parse_UnrelatedText_IsUnknown()
         {
             Assert.That(new NaturalLanguageFarmParser().Parse("今天天气不错").IsValid, Is.False);
+        }
+
+        [Test]
+        public void Parse_RequestWithoutPlot_PreservesFallbackButMarksItAsAutomatic()
+        {
+            var command = new NaturalLanguageFarmParser().Parse("帮我种胡萝卜并照料到收获", "plot-4");
+
+            Assert.That(command.PlotId, Is.EqualTo("plot-4"));
+            Assert.That(command.HasExplicitPlot, Is.False);
         }
 
         [Test]

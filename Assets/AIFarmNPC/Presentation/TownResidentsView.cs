@@ -16,6 +16,7 @@ namespace AIFarmNPC.Presentation
             public Canvas Bubble;
             public Text BubbleText;
             public GameObject Selection;
+            public Coroutine MoveRoutine;
         }
 
         private readonly List<ResidentView> residents = new List<ResidentView>();
@@ -48,14 +49,28 @@ namespace AIFarmNPC.Presentation
 
         public void MoveResidentToPlot(int residentIndex, int plotIndex, float seconds, string action)
         {
-            if (residentIndex <= 0)
+            if (residentIndex < 0) return;
+            var target = world.GetPlotWorldPosition(plotIndex) + ResidentPlotOffset(residentIndex);
+            if (residentIndex == 0)
             {
-                world.MoveNpcToPlot(plotIndex, seconds, action);
+                world.MoveNpcTo(target, seconds, action);
                 return;
             }
             if (residentIndex >= residents.Count) return;
-            var target = world.GetPlotWorldPosition(plotIndex) + new Vector3(0f, 0f, -1.7f);
-            StartCoroutine(Move(residents[residentIndex].Root, target, seconds));
+            var view = residents[residentIndex];
+            if (view.MoveRoutine != null) StopCoroutine(view.MoveRoutine);
+            view.MoveRoutine = StartCoroutine(Move(view.Root, target, seconds));
+        }
+
+        public static Vector3 ResidentPlotOffset(int residentIndex)
+        {
+            switch (Mathf.Abs(residentIndex) % 4)
+            {
+                case 1: return new Vector3(-1.65f, 0f, -0.55f);
+                case 2: return new Vector3(1.65f, 0f, -0.55f);
+                case 3: return new Vector3(0f, 0f, 1.65f);
+                default: return new Vector3(0f, 0f, -1.75f);
+            }
         }
 
         public void Say(int residentIndex, string message, string emoji, float seconds = 3.5f)

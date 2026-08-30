@@ -24,6 +24,7 @@ namespace AIFarmNPC.Runtime
         {
             { "plot-1", 0 }, { "plot-2", 1 }, { "plot-3", 2 }, { "plot-4", 3 }
         };
+        private readonly NaturalLanguageFarmParser _commandParser = new NaturalLanguageFarmParser();
 
         private FarmGameApi _gameApi;
         private FarmNpcAgent _agent;
@@ -97,7 +98,7 @@ namespace AIFarmNPC.Runtime
             _dashboard.CommandSubmitted += SubmitCommand;
             _dashboard.ClearLog();
             _dashboard.AppendLog("系统：4 名 AI 居民已就绪，每人拥有独立模型路由。");
-            _dashboard.CommandText = "沫沫，请在地块1种胡萝卜并照顾到收获";
+            _dashboard.CommandText = "沫沫，请找一块空地种胡萝卜并照顾到收获";
             RefreshPresentation();
             _townResidentsView.Say(0, "选择我们中的任何一位来帮忙吧！", "🏡", 5f);
             _nextTickAt = Time.unscaledTime + TickSeconds;
@@ -171,8 +172,14 @@ namespace AIFarmNPC.Runtime
             yield return _modelGateway.Generate(resident, command, value => reply = value);
             if (reply != null && reply.Success)
             {
-                _dashboard.AppendLog(resident.Persona.Name + "（" + resident.ModelConfig.DisplayName + "）：" + reply.Text);
-                _townResidentsView.Say(residentIndex, reply.Text, "💬", 4f);
+                var cue = ResidentSocialCueFactory.Create(resident, Observe());
+                var line = NormalizeSocialLine(reply.Text, resident.Persona.Name);
+                _dashboard.AppendLog("[在线回应·" + cue.ObservationLabel + "] " + cue.Emoji + " " +
+                                     resident.Persona.Name + "（" + resident.ModelConfig.DisplayName + "）：" + line);
+                _townResidentsView.Say(residentIndex, line, cue.Emoji, 4.5f);
+                _dashboard.SetNpcStatus(resident.Persona.Name,
+                    MoodLabel(cue.Mood) + " · " + resident.Specialty, "正在回应玩家 · " + cue.ObservationLabel);
+                _residentAgents[residentIndex].Mind.RememberConversation(Observe(), "玩家", line, cue.Mood);
             }
             else
             {
@@ -189,7 +196,30 @@ namespace AIFarmNPC.Runtime
             _activeTaskResidentIndex = residentIndex;
             _executingResidentIndex = residentIndex;
             _agent = _residentAgents[residentIndex];
-            var acceptance = _agent.Submit(command, "plot-1", "carrot");
+            var observation = Observe();
+            var parsed = _commandParser.Parse(command, "plot-1", "carrot");
+            var targetPlotId = parsed.PlotId;
+            if (!parsed.HasExplicitPlot)
+            {
+                targetPlotId = FarmPlotSelector.Select(parsed.Intent, observation);
+                if (string.IsNullOrWhiteSpace(targetPlotId))
+                {
+                    RejectUnavailablePlot(residentIndex, parsed.Intent);
+                    return;
+                }
+                _dashboard.AppendLog("地块调度：根据当前田地状态，自动选择 " + targetPlotId + "。");
+            }
+            else if ((parsed.Intent == FarmIntent.FullCycle || parsed.Intent == FarmIntent.Sow) &&
+                     observation.FindPlot(CanonicalPlotId(targetPlotId)) is { IsEmpty: false })
+            {
+                _dashboard.AppendLog("地块调度：" + targetPlotId + " 已有作物，请指定空地或省略地块让居民自动选择。");
+                _townResidentsView.Say(residentIndex, "这块地已经种好了，换一块空地吧！", "🌱⚠️", 4f);
+                _activeTaskResidentIndex = -1;
+                RefreshPresentation();
+                return;
+            }
+
+            var acceptance = _agent.Submit(command, targetPlotId, "carrot");
             if (!acceptance.Accepted)
             {
                 _dashboard.AppendLog("系统：无法接受任务 — " + acceptance.Message);
@@ -220,7 +250,7 @@ namespace AIFarmNPC.Runtime
             _apiConfig.SetResidents(BuildResidentDisplays(), index);
             SyncApiConfigUI();
             var resident = _residents[index];
-            _dashboard.CommandText = resident.Persona.Name + "，请在地块1种胡萝卜并照顾到收获";
+            _dashboard.CommandText = resident.Persona.Name + "，请找一块空地种胡萝卜并照顾到收获";
             _dashboard.AppendLog("已选择 " + resident.Persona.Name + "；模型：" + resident.ModelConfig.DisplayName +
                                  " / " + resident.ModelConfig.Model + "。 ");
             _townResidentsView.Say(index, resident.Persona.CatchPhrase + "！", "👋", 3f);
@@ -251,7 +281,7 @@ namespace AIFarmNPC.Runtime
                 RefreshResidentConfigurationViews();
                 _apiConfig.ShowResult("已保存到 " + _residents[index].Persona.Name + "。Key 仅驻留内存。", true);
                 _dashboard.AppendLog("API 配置：已更新 " + _residents[index].Persona.Name + " 的 OpenAI-compatible 路由。");
-                ScheduleNextSocialConversation(10f, 16f);
+                StartResidentConnectionCheck(index);
             }
             catch (Exception exception)
             {
@@ -270,12 +300,58 @@ namespace AIFarmNPC.Runtime
                 RefreshResidentConfigurationViews();
                 _apiConfig.ShowResult("已将同一 OpenAI-compatible 配置应用到全部 " + _residents.Count + " 名居民。", true);
                 _dashboard.AppendLog("API 配置：全部居民已切换到同一 URL / 模型。 ");
-                ScheduleNextSocialConversation(10f, 16f);
+                StartResidentConnectionCheck(_selectedResidentIndex);
             }
             catch (Exception exception)
             {
                 _apiConfig.ShowResult("配置失败：" + exception.Message, false);
             }
+        }
+
+        private void StartResidentConnectionCheck(int residentIndex)
+        {
+            if (residentIndex < 0 || residentIndex >= _residents.Count) return;
+            if (_modelRequestInFlight || _activeTaskResidentIndex >= 0)
+            {
+                ScheduleNextSocialConversation(3f, 6f);
+                return;
+            }
+            StartCoroutine(RunResidentConnectionCheck(residentIndex));
+        }
+
+        private IEnumerator RunResidentConnectionCheck(int residentIndex)
+        {
+            _modelRequestInFlight = true;
+            RefreshPresentation();
+            var resident = _residents[residentIndex];
+            var cue = ResidentSocialCueFactory.Create(resident, Observe());
+            _apiConfig.ShowResult("正在连接 " + resident.ModelConfig.Model + "，等待居民回应…", true);
+            _dashboard.AppendLog("在线互动：正在请 " + resident.Persona.Name + " 根据当前状态发表观察。");
+
+            ModelGatewayReply reply = null;
+            yield return _modelGateway.GenerateAmbientReaction(resident, cue, value => reply = value);
+            if (reply != null && reply.Success)
+            {
+                var line = NormalizeSocialLine(reply.Text, resident.Persona.Name);
+                _townResidentsView.Say(residentIndex, line, cue.Emoji, 5.5f);
+                _dashboard.AppendLog("[在线互动·" + cue.ObservationLabel + "] " + cue.Emoji + " " +
+                                     resident.Persona.Name + "：" + line);
+                _dashboard.SetNpcStatus(resident.Persona.Name,
+                    MoodLabel(cue.Mood) + " · " + resident.Specialty, "在线观察 · " + cue.ObservationLabel);
+                _residentAgents[residentIndex].Mind.RememberConversation(Observe(), "小镇", line, cue.Mood);
+                _apiConfig.ShowResult("连接成功：" + resident.Persona.Name + " 已产生在线回应；关闭窗口即可观察。", true);
+            }
+            else
+            {
+                var error = reply?.Error ?? "在线模型无响应";
+                _townResidentsView.Say(residentIndex, "连接没有成功，我先继续观察。", "🔌😵", 4f);
+                _dashboard.AppendLog("在线互动失败：" + error);
+                _apiConfig.ShowResult("连接失败：" + error, false);
+            }
+
+            _modelRequestInFlight = false;
+            RefreshPresentation();
+            ScheduleNextSocialConversation(3f, 6f);
         }
 
         private void RefreshResidentConfigurationViews()
@@ -304,20 +380,28 @@ namespace AIFarmNPC.Runtime
             for (var i = 0; i < _residents.Count; i++)
                 if (_residents[i].ModelConfig.HasApiKey()) configured.Add(i);
 
-            if (configured.Count < 2)
+            if (configured.Count == 0)
             {
                 ScheduleNextSocialConversation();
                 return;
             }
 
             var speakerPosition = UnityEngine.Random.Range(0, configured.Count);
-            if (configured.Count > 2 && configured[speakerPosition] == _lastSocialSpeakerIndex)
+            if (configured.Count > 1 && configured[speakerPosition] == _lastSocialSpeakerIndex)
                 speakerPosition = (speakerPosition + 1) % configured.Count;
-            var listenerPosition = UnityEngine.Random.Range(0, configured.Count - 1);
-            if (listenerPosition >= speakerPosition) listenerPosition++;
-
             var speakerIndex = configured[speakerPosition];
-            var listenerIndex = configured[listenerPosition];
+            int listenerIndex;
+            if (configured.Count > 1)
+            {
+                var listenerPosition = UnityEngine.Random.Range(0, configured.Count - 1);
+                if (listenerPosition >= speakerPosition) listenerPosition++;
+                listenerIndex = configured[listenerPosition];
+            }
+            else
+            {
+                listenerIndex = UnityEngine.Random.Range(0, _residents.Count - 1);
+                if (listenerIndex >= speakerIndex) listenerIndex++;
+            }
             _lastSocialSpeakerIndex = speakerIndex;
             _socialConversationRoutine = StartCoroutine(RunSocialConversation(speakerIndex, listenerIndex));
         }
@@ -347,6 +431,15 @@ namespace AIFarmNPC.Runtime
             yield return new WaitForSecondsRealtime(1.6f);
             if (_activeTaskResidentIndex >= 0 || _modelRequestInFlight)
             {
+                FinishSocialConversation(false);
+                yield break;
+            }
+
+            if (!listener.ModelConfig.HasApiKey())
+            {
+                var localLine = ResidentSocialCueFactory.CreateLocalReply(listener, listenerCue,
+                    speaker.Persona.Name, openingLine);
+                ShowSocialLine(listenerIndex, speakerIndex, localLine, listenerCue);
                 FinishSocialConversation(false);
                 yield break;
             }
@@ -391,6 +484,19 @@ namespace AIFarmNPC.Runtime
             if (namedPrefix.Length > 1 && result.StartsWith(namedPrefix, StringComparison.Ordinal))
                 result = result.Substring(namedPrefix.Length).Trim();
             return result.Length <= 72 ? result : result.Substring(0, 72) + "…";
+        }
+
+        private void RejectUnavailablePlot(int residentIndex, FarmIntent intent)
+        {
+            var message = intent == FarmIntent.FullCycle || intent == FarmIntent.Sow
+                ? "目前没有空地，先收获一块成熟作物再种吧。"
+                : intent == FarmIntent.Harvest
+                    ? "目前没有成熟作物可以收获。"
+                    : "目前没有符合这个农活条件的地块。";
+            _dashboard.AppendLog("地块调度：" + message);
+            _townResidentsView.Say(residentIndex, message, "🗺️🤔", 4f);
+            _activeTaskResidentIndex = -1;
+            RefreshPresentation();
         }
 
         private void FinishSocialConversation(bool requestFailed)

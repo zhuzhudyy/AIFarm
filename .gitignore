@@ -9,6 +9,9 @@ UserSettings/
 [Bb]uild/
 [Bb]uilds/
 
+# Local API credentials
+/API
+
 # IDE / editor files
 .vs/
 .vscode/

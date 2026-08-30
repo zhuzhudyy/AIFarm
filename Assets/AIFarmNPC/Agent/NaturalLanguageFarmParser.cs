@@ -28,9 +28,9 @@ namespace AIFarmNPC.Agent
             var lower = text.ToLowerInvariant();
             var language = Regex.IsMatch(text, @"[\u3400-\u9fff]") ? "zh" : "en";
             var crop = FindCrop(lower, defaultCropId);
-            var plot = FindPlot(text, defaultPlotId);
+            var plot = FindPlot(text, defaultPlotId, out var hasExplicitPlot);
             var intent = FindIntent(lower);
-            return new ParsedFarmCommand(intent, crop, plot, text, language);
+            return new ParsedFarmCommand(intent, crop, plot, text, language, hasExplicitPlot);
         }
 
         private static string FindCrop(string text, string fallback)
@@ -44,9 +44,10 @@ namespace AIFarmNPC.Agent
             return string.IsNullOrWhiteSpace(fallback) ? "wheat" : fallback;
         }
 
-        private static string FindPlot(string text, string fallback)
+        private static string FindPlot(string text, string fallback, out bool hasExplicitPlot)
         {
             var match = PlotPattern.Match(text);
+            hasExplicitPlot = match.Success;
             if (!match.Success) return fallback;
             var captured = match.Groups[1].Value;
             return Regex.IsMatch(captured, @"^\d+$") ? "plot-" + captured : captured;

@@ -63,6 +63,26 @@ namespace AIFarmNPC.Runtime
             yield return GeneratePrompt(speaker, prompt, completed);
         }
 
+        public IEnumerator GenerateAmbientReaction(TownResidentProfile resident, ResidentSocialCue cue,
+            Action<ModelGatewayReply> completed)
+        {
+            if (resident == null)
+            {
+                completed?.Invoke(new ModelGatewayReply(false, "", "居民配置为空。", false));
+                yield break;
+            }
+
+            cue = cue ?? ResidentSocialCueFactory.Create(resident, null);
+            var prompt = "你是小镇居民" + resident.Persona.Name + "，身份是" + resident.Persona.Role +
+                         "，专长是" + resident.Specialty + "，口头禅是\"" + resident.Persona.CatchPhrase + "\"。" +
+                         "你刚观察到【" + cue.ObservationLabel + "】：" + cue.StateSummary + "。" +
+                         "表达角度：" + cue.PersonaAngle + "。" +
+                         "请像有日常生活的居民一样，主动说一句12到45个汉字的自然中文台词；" +
+                         "要体现观察、情绪或一个小建议。只输出台词，不要姓名、引号、表情符号或舞台说明，" +
+                         "不要声称已经改变游戏世界。";
+            yield return GeneratePrompt(resident, prompt, completed);
+        }
+
         private IEnumerator GeneratePrompt(TownResidentProfile resident, string prompt, Action<ModelGatewayReply> completed)
         {
             if (resident == null)
