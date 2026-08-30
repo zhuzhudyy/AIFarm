@@ -2,6 +2,8 @@
 
 一个可直接在 Unity 6.5 Play Mode 中演示的自然语言 AI 农场伙伴原型。
 
+已提供 Windows x64 独立应用构建：`Builds/Windows/AIFarmNPC.exe`，无需安装 Unity；完整交付包见 `Builds/AIFarmNPC-Windows-x64-v0.1.0.zip`。
+
 ## 运行
 
 1. 用 Unity 打开项目和 `Assets/Scenes/SampleScene.unity`。
